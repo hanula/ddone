@@ -1,0 +1,146 @@
+#!/bin/python3
+
+
+import os
+import json
+import arrow
+import itertools
+import argparse
+from rich import print
+
+DB_FILE = os.path.expanduser("~/.config/ddone.json")
+
+
+class Task:
+    def __init__(self, id: int, title: str, time=None):
+        self.title = title
+        self.time = arrow.get(time) if time else arrow.get()
+        self.id = id
+
+    def serialize(self):
+        return {
+            "id": self.id,
+            "title": self.title,
+            "time": self.time.isoformat(),
+        }
+
+
+class DB:
+    def load(self):
+        try:
+            with open(DB_FILE) as f:
+                self.tasks = [Task(**r) for r in json.load(f)]
+        except FileNotFoundError:
+            self.tasks = []
+
+    def save(self):
+        data = [t.serialize() for t in self.tasks]
+        with open(DB_FILE, "wt") as f:
+            json.dump(data, f)
+
+    def get_tasks(self, order_by="time"):
+        def group_func(task):
+            return task.time.floor("day")
+
+        tasks = sorted(self.tasks, key=group_func)
+        for time, tasks in itertools.groupby(tasks, group_func):
+            yield time, tasks
+
+    def add_task(self, title: str, time: arrow.Arrow):
+        new_id = (max(t.id for t in self.tasks) if self.tasks else 0) + 1
+        self.tasks.append(Task(id=new_id, title=title, time=time))
+
+    def delete_tasks(self, tasks: list[int]):
+        self.tasks = [task for task in self.tasks if task.id not in tasks]
+
+
+def parse_args():
+    def parse_time(v):
+        if v == "yesterday":
+            return arrow.get().shift(days=-1)
+        else:
+            return arrow.get(v)
+
+    parser = argparse.ArgumentParser()
+
+    subparsers = parser.add_subparsers(dest="action", required=True)
+
+    parser_add = subparsers.add_parser("add", help="Add task", aliases=["a"])
+    parser_add.add_argument("task")
+    parser_add.add_argument("--time", type=parse_time)
+
+    parser_list = subparsers.add_parser("list", help="List tasks", aliases=["l"])
+    parser_list.add_argument("--raw", action=argparse.BooleanOptionalAction)
+    parser_list.add_argument(
+        "-t", "--time", help="Show time", action=argparse.BooleanOptionalAction
+    )
+    parser_list.add_argument(
+        "-i", "--id", help="Show ID", action=argparse.BooleanOptionalAction
+    )
+    parser_list.add_argument(
+        "--inline", help="Print items inline", action=argparse.BooleanOptionalAction
+    )
+
+    parser_del = subparsers.add_parser("del", help="Delete tasks", aliases=["d"])
+    parser_del.add_argument("tasks", type=int, nargs="+")
+    return parser.parse_args()
+
+
+def add_task(db, task: str, time: arrow.Arrow):
+    db.add_task(task, time)
+    db.save()
+
+
+def list_tasks(db, args):
+    if args.raw:
+        print([t.serialize() for t in db.tasks])
+    else:
+        for time, tasks in db.get_tasks():
+            time = time.to("local")
+            print(f"{time.datetime:%Y.%m.%d}")
+
+            if args.inline:
+
+                def inline_title(t):
+                    t = t.strip()
+                    if len(t) > 1 and t[1].islower():
+                        return t[0].lower() + t[1:]
+                    else:
+                        return t
+
+                print(", ".join(inline_title(task.title) for task in tasks))
+            else:
+                for task in tasks:
+                    print(f"    ", end="")
+                    if args.id:
+                        print(f"[grey42][{task.id}][/grey42] ", end="")
+                    else:
+                        print("[grey42]*[/] ", end="")
+                    if args.time:
+                        print(f" {time.datetime:%H:%M}  ", end="")
+                    print(task.title)
+
+
+def delete_tasks(db, tasks: list[int]):
+    db.delete_tasks(tasks)
+    db.save()
+
+
+def main():
+    args = parse_args()
+
+    db = DB()
+    db.load()
+
+    if args.action in ("a", "add"):
+        add_task(db, args.task, args.time)
+
+    elif args.action in ("l", "list"):
+        list_tasks(db, args)
+
+    elif args.action in ("d", "del"):
+        delete_tasks(db, args.tasks)
+
+
+if __name__ == "__main__":
+    main()
